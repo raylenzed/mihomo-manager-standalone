@@ -29,7 +29,7 @@
 
 ```bash
 curl -Lo /usr/local/bin/mihomo-manager \
-  https://raw.githubusercontent.com/RaylenZed/mihomo-manager/main/mihomo-manager.sh
+  https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/mihomo-manager.sh
 chmod +x /usr/local/bin/mihomo-manager
 ```
 
@@ -172,7 +172,7 @@ Mihomo 开启 TUN 模式后，`auto-route: true` 会创建 ip rule 劫持所有�
 
 ```bash
 curl -Lo /usr/local/bin/mihomo-manager \
-  https://raw.githubusercontent.com/RaylenZed/mihomo-manager/main/mihomo-manager.sh
+  https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/mihomo-manager.sh
 chmod +x /usr/local/bin/mihomo-manager
 ```
 

@@ -1,7 +1,7 @@
 #!/bin/bash
 # ============================================================
 #  Mihomo Manager - 代理服务管理脚本
-#  项目地址: https://github.com/RaylenZed/mihomo-manager
+#  项目地址: https://github.com/raylenzed/mihomo-manager-standalone
 # ============================================================
 
 # ── 常量 ────────────────────────────────────────────────────
@@ -13,8 +13,8 @@ SERVICE_NAME="mihomo"
 LATEST_VERSION_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 SCRIPT_PATH="$(realpath "$0")"
 SCRIPT_VERSION="2.7.1"
-SCRIPT_RAW_URL="https://raw.githubusercontent.com/RaylenZed/mihomo-manager/main/mihomo-manager.sh"
-SCRIPT_VERSION_URL="https://raw.githubusercontent.com/RaylenZed/mihomo-manager/main/version"
+SCRIPT_RAW_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/mihomo-manager.sh"
+SCRIPT_VERSION_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/version"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
 CYAN='\033[0;36m'; BOLD='\033[1m'; DIM='\033[2m'; NC='\033[0m'
