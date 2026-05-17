@@ -12,7 +12,7 @@ SERVICE_FILE="/etc/systemd/system/mihomo.service"
 SERVICE_NAME="mihomo"
 LATEST_VERSION_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 SCRIPT_PATH="$(realpath "$0")"
-SCRIPT_VERSION="2.7.1"
+SCRIPT_VERSION="2.8.0"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/mihomo-manager.sh"
 SCRIPT_VERSION_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/version"
 
@@ -2002,49 +2002,67 @@ menu_webui() {
             echo ""
         fi
         echo -e "  ${BOLD}在线面板备用:${NC}"
+        echo -e "  Zashboard:  ${CYAN}$(_webui_url "https://board.zash.run.place/#/setup")${NC}"
         echo -e "  Metacubexd: ${CYAN}$(_webui_url "https://metacubex.github.io/metacubexd")${NC}"
         echo -e "  Yacd-meta:  ${CYAN}$(_webui_url "http://yacd.metacubex.one")${NC}"
         echo ""
         divider
-        echo -e "  1. 安装本地 UI（Metacubexd）    ${YELLOW}[需要root]${NC}"
-        echo -e "  2. 安装本地 UI（Yacd-meta）     ${YELLOW}[需要root]${NC}"
-        echo -e "  3. 设置 / 修改 Secret           ${YELLOW}[需要root]${NC}"
-        echo -e "  4. 移除本地 UI                  ${YELLOW}[需要root]${NC}"
+        echo -e "  1. 安装本地 UI（Zashboard，推荐）${YELLOW}[需要root]${NC}"
+        echo -e "  2. 安装本地 UI（Metacubexd）     ${YELLOW}[需要root]${NC}"
+        echo -e "  3. 安装本地 UI（Yacd-meta）      ${YELLOW}[需要root]${NC}"
+        echo -e "  4. 设置 / 修改 Secret            ${YELLOW}[需要root]${NC}"
+        echo -e "  5. 移除本地 UI                   ${YELLOW}[需要root]${NC}"
         echo "  0. 返回"
         echo ""
         printf "  请输入选项: "
         read -r c
         case "$c" in
-            1) _webui_install "metacubexd" ;;
-            2) _webui_install "yacd" ;;
-            3) _webui_set_secret ;;
-            4) _webui_remove ;;
+            1) _webui_install "zashboard" ;;
+            2) _webui_install "metacubexd" ;;
+            3) _webui_install "yacd" ;;
+            4) _webui_set_secret ;;
+            5) _webui_remove ;;
             0) return ;;
             *) error "无效选项"; sleep 1 ;;
         esac
     done
 }
 
+_webui_flavor_label() {
+    case "$1" in
+        zashboard) echo "Zashboard" ;;
+        metacubexd) echo "Metacubexd" ;;
+        yacd) echo "Yacd-meta" ;;
+        *) echo "$1" ;;
+    esac
+}
+
 _webui_install() {
     require_root || { pause; return; }
     local flavor="$1"
     clear
-    title "安装本地 UI - ${flavor}"
+    title "安装本地 UI - $(_webui_flavor_label "$flavor")"
 
     local download_url filename
-    if [ "$flavor" = "metacubexd" ]; then
+    if [ "$flavor" = "zashboard" ]; then
+        download_url="https://github.com/Zephyruso/zashboard/releases/latest/download/dist.zip"
+        filename="zashboard-dist.zip"
+    elif [ "$flavor" = "metacubexd" ]; then
         download_url="https://github.com/MetaCubeX/metacubexd/releases/latest/download/compressed-dist.tgz"
         filename="compressed-dist.tgz"
-    else
+    elif [ "$flavor" = "yacd" ]; then
         download_url="https://github.com/MetaCubeX/yacd/releases/latest/download/yacd-meta.gh-pages.zip"
         filename="yacd-meta.gh-pages.zip"
+    else
+        error "未知 UI 类型: ${flavor}"
+        pause; return
     fi
 
     local tmp
     tmp=$(mktemp -d)
     trap "rm -rf '$tmp'" RETURN
 
-    info "下载 ${flavor}..."
+    info "下载 $(_webui_flavor_label "$flavor")..."
     if ! curl -L --max-time 60 -o "$tmp/$filename" "$download_url" --progress-bar; then
         error "下载失败，请检查网络后重试"
         pause; return
@@ -2062,14 +2080,21 @@ _webui_install() {
         else
             python3 -c "import zipfile,sys; zipfile.ZipFile('$tmp/$filename').extractall('$tmp/unzipped')"
         fi
-        # yacd 解压后是 public 子目录
-        local inner
-        inner=$(ls "$tmp/unzipped/" | head -1)
-        if [ -d "$tmp/unzipped/$inner" ]; then
-            cp -r "$tmp/unzipped/$inner/." "$UI_DIR/"
+
+        # 不同面板的 zip 目录层级不一致，统一以 index.html 所在目录为站点根目录。
+        local index_file index_dir
+        index_file=$(find "$tmp/unzipped" -type f -name index.html | head -1)
+        if [ -n "$index_file" ]; then
+            index_dir=$(dirname "$index_file")
+            cp -r "$index_dir/." "$UI_DIR/"
         else
             cp -r "$tmp/unzipped/." "$UI_DIR/"
         fi
+    fi
+
+    if [ ! -f "$UI_DIR/index.html" ]; then
+        error "安装失败：解压后未找到 index.html"
+        pause; return
     fi
 
     # 写入 external-ui 配置

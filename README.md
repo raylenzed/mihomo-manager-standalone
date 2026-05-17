@@ -12,6 +12,7 @@
 - **服务管理** — 启动 / 停止 / 重启 / 开机自启
 - **配置管理** — 导入配置、在线编辑、添加域名规则、更新 GeoIP 数据库、重建路由规则
 - **Docker 代理** — 配置 Docker daemon 代理，容器网络诊断
+- **本地 Web UI** — 一键安装 Zashboard、MetaCubeXD 或 Yacd-meta 到 Mihomo `external-ui`
 - **网络测试** — 并行检测 Google、YouTube、GitHub、Claude、ChatGPT 等连通性及出口 IP
 - **IPv6 管理** — 一键启用/禁用 IPv6 并持久化
 - **脚本自更新** — 在线检测新版本，一键升级
@@ -88,10 +89,17 @@ mm log-follow   # 实时日志
 12  Tailscale 兼容   │
                      └──────────────────────
 ━━ 其他 ━━
+13  管理面板（Web UI）
+    ├─ 1. 安装本地 UI（Zashboard，推荐）
+    ├─ 2. 安装本地 UI（Metacubexd）
+    ├─ 3. 安装本地 UI（Yacd-meta）
+    ├─ 4. 设置 / 修改 Secret
+    └─ 5. 移除本地 UI
+14  复制代理链接
 15  系统网络设置（IPv6 管理）
 16  Docker 代理设置
-13  脚本自更新
-14  卸载 Mihomo
+17  脚本自更新
+18  卸载 Mihomo
  0  退出
 ```
 
