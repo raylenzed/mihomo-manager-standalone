@@ -12,7 +12,7 @@ SERVICE_FILE="/etc/systemd/system/mihomo.service"
 SERVICE_NAME="mihomo"
 LATEST_VERSION_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 SCRIPT_PATH="$(realpath "$0")"
-SCRIPT_VERSION="2.8.0"
+SCRIPT_VERSION="2.8.1"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/mihomo-manager.sh"
 SCRIPT_VERSION_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/version"
 
@@ -1068,6 +1068,75 @@ _ts_check() {
     command -v tailscale >/dev/null 2>&1 || { error "Tailscale 未安装，请先选择「安装 Tailscale」"; pause; return 1; }
 }
 
+_ts_redact_output() {
+    sed -E 's/tskey-auth-[A-Za-z0-9_-]+/tskey-auth-***REDACTED***/g'
+}
+
+_ts_show_output() {
+    local file="$1"
+    [ -s "$file" ] || return 0
+    echo ""
+    warn "Tailscale 返回："
+    _ts_redact_output < "$file" | sed 's/^/  /'
+}
+
+_ts_show_troubleshooting_tips() {
+    echo ""
+    warn "排查建议："
+    echo "  1. 确认 tailscaled 服务正在运行：systemctl status tailscaled --no-pager"
+    echo "  2. 确认服务器能访问 Tailscale 控制面：curl -I https://controlplane.tailscale.com"
+    echo "  3. Auth Key 如果已过期、已使用过且不可复用、被撤销，需重新生成"
+    echo "  4. 如果 Mihomo TUN 正在运行，建议先开启「Tailscale 兼容设置」后再登录"
+}
+
+_ts_ensure_service() {
+    command -v systemctl >/dev/null 2>&1 || return 0
+
+    if systemctl is-active tailscaled >/dev/null 2>&1; then
+        return 0
+    fi
+
+    local out
+    out=$(mktemp /tmp/tailscale-service.XXXXXX)
+    info "正在启动 tailscaled 服务..."
+
+    if systemctl enable --now tailscaled >"$out" 2>&1; then
+        sleep 1
+        rm -f "$out"
+        return 0
+    fi
+
+    error "tailscaled 服务启动失败"
+    _ts_show_output "$out"
+    rm -f "$out"
+    return 1
+}
+
+_ts_apply_accept_routes() {
+    local accept_routes="$1"
+    local out
+
+    [ "$accept_routes" = "1" ] || return 0
+
+    out=$(mktemp /tmp/tailscale-routes.XXXXXX)
+    info "正在开启子网路由接收..."
+    if tailscale set --accept-routes=true >"$out" 2>&1; then
+        info "已开启子网路由接收"
+        rm -f "$out"
+        return 0
+    fi
+
+    error "子网路由接收设置失败"
+    _ts_show_output "$out"
+    rm -f "$out"
+    return 1
+}
+
+_ts_extract_auth_url() {
+    local file="$1"
+    grep -Eo 'https://login\.tailscale\.com/[A-Za-z0-9_./?=&%:+-]+' "$file" | head -1
+}
+
 _ts_status() {
     _ts_check || return
     clear
@@ -1090,9 +1159,11 @@ _ts_up() {
     clear
     title "连接 Tailscale 网络"
 
-    local extra=""
+    _ts_ensure_service || { _ts_show_troubleshooting_tips; pause; return; }
+
+    local accept_routes=0
     if ask "是否接受其他节点共享的子网路由？（不确定选 n）" n; then
-        extra="--accept-routes"
+        accept_routes=1
     fi
     echo ""
 
@@ -1107,12 +1178,22 @@ _ts_up() {
         read -r login_choice
 
         case "$login_choice" in
-            1) _ts_login_url "$extra" ;;
-            2) _ts_login_key "$extra" ;;
+            1) _ts_login_url "$accept_routes" ;;
+            2) _ts_login_key "$accept_routes" ;;
             *) return ;;
         esac
     else
-        tailscale up $extra 2>&1 && info "已连接到 Tailscale 网络" || error "连接失败"
+        local out
+        out=$(mktemp /tmp/tailscale-up.XXXXXX)
+        if tailscale up --timeout=30s >"$out" 2>&1; then
+            info "已连接到 Tailscale 网络"
+            _ts_apply_accept_routes "$accept_routes"
+        else
+            error "连接失败"
+            _ts_show_output "$out"
+            _ts_show_troubleshooting_tips
+        fi
+        rm -f "$out"
     fi
 
     echo ""
@@ -1123,36 +1204,21 @@ _ts_up() {
 }
 
 _ts_login_url() {
-    local extra="$1"
-    local ts_sock="/var/run/tailscale/tailscaled.sock"
-    local ts_api="http://local-tailscaled.sock/localapi/v0/status"
+    local accept_routes="$1"
+    local out auth_url
 
     info "正在获取认证链接..."
     echo ""
 
-    local _get_auth_url
-    _get_auth_url() {
-        curl -s --unix-socket "$ts_sock" "$ts_api" 2>/dev/null \
-            | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('AuthURL',''))" 2>/dev/null
-    }
-
-    # 先检查是否已有 AuthURL（上次登录流程留下的）
-    local auth_url
-    auth_url=$(_get_auth_url)
-
-    # 没有的话，后台启动 tailscale login 触发生成，再轮询
-    if [ -z "$auth_url" ]; then
-        tailscale login >/dev/null 2>&1 &
-        local ts_pid=$!
-        local i=0
-        while [ $i -lt 30 ]; do
-            sleep 0.5
-            auth_url=$(_get_auth_url)
-            [ -n "$auth_url" ] && break
-            i=$((i + 1))
-        done
-        kill "$ts_pid" 2>/dev/null || true
+    out=$(mktemp /tmp/tailscale-login.XXXXXX)
+    if tailscale up --qr=false --timeout=15s >"$out" 2>&1; then
+        info "已连接到 Tailscale 网络"
+        _ts_apply_accept_routes "$accept_routes"
+        rm -f "$out"
+        return 0
     fi
+
+    auth_url=$(_ts_extract_auth_url "$out")
 
     if [ -n "$auth_url" ]; then
         echo -e "  请在浏览器中打开以下链接完成认证："
@@ -1165,19 +1231,30 @@ _ts_login_url() {
         warn "认证完成后按 Enter 继续..."
         read -r
         echo ""
-        info "正在建立连接..."
-        tailscale up $extra 2>&1 && info "已连接到 Tailscale 网络" || error "连接失败，请稍后重试"
+        info "正在确认登录状态..."
+        if tailscale up --qr=false --timeout=30s >"$out" 2>&1; then
+            info "已连接到 Tailscale 网络"
+            _ts_apply_accept_routes "$accept_routes"
+        else
+            error "连接失败，请稍后重试"
+            _ts_show_output "$out"
+            _ts_show_troubleshooting_tips
+        fi
     else
         error "未能获取认证链接"
+        _ts_show_output "$out"
         echo ""
         warn "可能原因：代理节点无法访问 Tailscale 服务器"
         warn "建议切换代理节点后重试，或改用 Auth Key 方式登录"
         warn "Auth Key 生成地址：https://login.tailscale.com/admin/authkeys"
+        _ts_show_troubleshooting_tips
     fi
+
+    rm -f "$out"
 }
 
 _ts_login_key() {
-    local extra="$1"
+    local accept_routes="$1"
     echo ""
     warn "请先在浏览器打开以下地址生成 Auth Key："
     echo ""
@@ -1194,9 +1271,24 @@ _ts_login_key() {
 
     echo ""
     info "正在使用 Auth Key 连接..."
-    tailscale up --auth-key="$auth_key" $extra 2>&1 \
-        && info "已连接到 Tailscale 网络" \
-        || error "连接失败，请检查 Auth Key 是否有效"
+
+    local key_file out
+    key_file=$(mktemp /tmp/tailscale-authkey.XXXXXX)
+    out=$(mktemp /tmp/tailscale-auth.XXXXXX)
+    chmod 600 "$key_file"
+    printf '%s' "$auth_key" > "$key_file"
+    auth_key=""
+
+    if tailscale up --auth-key="file:$key_file" --timeout=60s >"$out" 2>&1; then
+        info "已连接到 Tailscale 网络"
+        _ts_apply_accept_routes "$accept_routes"
+    else
+        error "连接失败，请检查 Auth Key 是否有效"
+        _ts_show_output "$out"
+        _ts_show_troubleshooting_tips
+    fi
+
+    rm -f "$key_file" "$out"
 }
 
 _ts_down() {
