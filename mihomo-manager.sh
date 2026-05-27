@@ -12,7 +12,7 @@ SERVICE_FILE="/etc/systemd/system/mihomo.service"
 SERVICE_NAME="mihomo"
 LATEST_VERSION_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 SCRIPT_PATH="$(realpath "$0")"
-SCRIPT_VERSION="2.8.1"
+SCRIPT_VERSION="2.8.2"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/mihomo-manager.sh"
 SCRIPT_VERSION_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/version"
 
@@ -1086,7 +1086,7 @@ _ts_show_troubleshooting_tips() {
     echo "  1. 确认 tailscaled 服务正在运行：systemctl status tailscaled --no-pager"
     echo "  2. 确认服务器能访问 Tailscale 控制面：curl -I https://controlplane.tailscale.com"
     echo "  3. Auth Key 如果已过期、已使用过且不可复用、被撤销，需重新生成"
-    echo "  4. 如果 Mihomo TUN 正在运行，建议先开启「Tailscale 兼容设置」后再登录"
+    echo "  4. 如果刚开启/关闭过兼容设置，请确认 Mihomo 已重启并加载新配置"
 }
 
 _ts_ensure_service() {
@@ -1137,6 +1137,30 @@ _ts_extract_auth_url() {
     grep -Eo 'https://login\.tailscale\.com/[A-Za-z0-9_./?=&%:+-]+' "$file" | head -1
 }
 
+_tailscale_process_direct_enabled() {
+    [ -f "$CONFIG_FILE" ] && grep -Eq 'PROCESS-NAME,[[:space:]]*tailscaled,[[:space:]]*DIRECT' "$CONFIG_FILE"
+}
+
+_ts_restart_mihomo_if_running() {
+    if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
+        systemctl restart "$SERVICE_NAME" \
+            && info "Mihomo 已重启，配置生效" \
+            || error "Mihomo 重启失败，请手动检查配置"
+    else
+        warn "Mihomo 未运行，配置会在下次启动时生效"
+    fi
+}
+
+_ts_prepare_login_network() {
+    _tailscale_process_direct_enabled || return 0
+
+    warn "检测到旧版兼容规则：tailscaled 进程被强制 DIRECT"
+    warn "登录阶段需要允许 tailscaled 走现有代理，否则可能无法访问 Tailscale 控制面"
+    sed -i '/PROCESS-NAME,[[:space:]]*tailscaled,[[:space:]]*DIRECT/d' "$CONFIG_FILE"
+    info "已移除旧规则：PROCESS-NAME,tailscaled,DIRECT"
+    _ts_restart_mihomo_if_running
+}
+
 _ts_status() {
     _ts_check || return
     clear
@@ -1160,6 +1184,7 @@ _ts_up() {
     title "连接 Tailscale 网络"
 
     _ts_ensure_service || { _ts_show_troubleshooting_tips; pause; return; }
+    _ts_prepare_login_network
 
     local accept_routes=0
     if ask "是否接受其他节点共享的子网路由？（不确定选 n）" n; then
@@ -1262,8 +1287,9 @@ _ts_login_key() {
     echo ""
     warn "建议勾选 Reusable（可复用），方便多台服务器使用同一个 key"
     echo ""
-    printf "  请粘贴 Auth Key（tskey-auth-xxx...）: "
-    read -r auth_key
+    printf "  请粘贴 Auth Key（tskey-auth-xxx...，输入时不会显示）: "
+    read -rs auth_key
+    echo ""
 
     if [ -z "$auth_key" ]; then
         error "Auth Key 不能为空"; return
@@ -1393,7 +1419,7 @@ menu_tailscale_compat() {
     echo "  • tun.exclude-interface: tailscale0"
     echo "  • dns.fake-ip-filter: *.ts.net"
     echo "  • rules: 100.64.0.0/10 → DIRECT"
-    echo "  • rules: tailscaled 进程 → DIRECT"
+    echo "  • 不强制 tailscaled 进程直连，登录控制面可走现有代理"
     echo ""
     divider
 
@@ -1441,21 +1467,41 @@ _tailscale_compat_enable() {
         info "已添加 dns.fake-ip-filter: *.ts.net"
     fi
 
+    if _tailscale_process_direct_enabled; then
+        sed -i '/PROCESS-NAME,[[:space:]]*tailscaled,[[:space:]]*DIRECT/d' "$CONFIG_FILE"
+        info "已移除旧规则：PROCESS-NAME,tailscaled,DIRECT"
+    fi
+
     # 路由规则
     if ! grep -q '100.64.0.0/10' "$CONFIG_FILE"; then
-        sed -i '/- GEOIP,LAN,DIRECT/i\  - IP-CIDR,100.64.0.0\/10,DIRECT,no-resolve\n  - IP-CIDR,100.100.100.100\/32,DIRECT\n  - PROCESS-NAME,tailscaled,DIRECT' "$CONFIG_FILE"
+        _tailscale_insert_rule 'IP-CIDR,100.64.0.0/10,DIRECT,no-resolve'
+        _tailscale_insert_rule 'IP-CIDR,100.100.100.100/32,DIRECT,no-resolve'
         info "已添加 Tailscale IP 段直连规则"
     else
         info "Tailscale 规则已存在，跳过"
     fi
 
     echo ""
-    if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
-        systemctl restart "$SERVICE_NAME" && info "Mihomo 已重启，配置生效" || error "重启失败"
-    else
-        warn "Mihomo 未运行，下次启动时生效"
-    fi
+    _ts_restart_mihomo_if_running
     pause
+}
+
+_tailscale_insert_rule() {
+    local rule="$1"
+
+    grep -Fq "$rule" "$CONFIG_FILE" && return 0
+
+    if grep -Eq '^[[:space:]]*-[[:space:]]*MATCH,' "$CONFIG_FILE"; then
+        sed -i "/^[[:space:]]*-[[:space:]]*MATCH,/i\\  - $rule" "$CONFIG_FILE"
+    elif grep -Eq '^[[:space:]]*-[[:space:]]*GEOIP,' "$CONFIG_FILE"; then
+        sed -i "/^[[:space:]]*-[[:space:]]*GEOIP,/i\\  - $rule" "$CONFIG_FILE"
+    else
+        cat >> "$CONFIG_FILE" << EOF
+
+rules:
+  - $rule
+EOF
+    fi
 }
 
 _tailscale_compat_disable() {
@@ -1467,13 +1513,11 @@ _tailscale_compat_disable() {
     sed -i "/'\*\.ts\.net'/d" "$CONFIG_FILE"
     sed -i '/100\.64\.0\.0\/10/d' "$CONFIG_FILE"
     sed -i '/100\.100\.100\.100/d' "$CONFIG_FILE"
-    sed -i '/PROCESS-NAME,tailscaled/d' "$CONFIG_FILE"
+    sed -i '/PROCESS-NAME,[[:space:]]*tailscaled,[[:space:]]*DIRECT/d' "$CONFIG_FILE"
     info "已移除所有 Tailscale 兼容配置"
 
     echo ""
-    if systemctl is-active "$SERVICE_NAME" >/dev/null 2>&1; then
-        systemctl restart "$SERVICE_NAME" && info "Mihomo 已重启，配置生效" || error "重启失败"
-    fi
+    _ts_restart_mihomo_if_running
     pause
 }
 
