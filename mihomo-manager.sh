@@ -12,7 +12,7 @@ SERVICE_FILE="/etc/systemd/system/mihomo.service"
 SERVICE_NAME="mihomo"
 LATEST_VERSION_API="https://api.github.com/repos/MetaCubeX/mihomo/releases/latest"
 SCRIPT_PATH="$(realpath "$0")"
-SCRIPT_VERSION="2.8.2"
+SCRIPT_VERSION="2.8.3"
 SCRIPT_RAW_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/mihomo-manager.sh"
 SCRIPT_VERSION_URL="https://raw.githubusercontent.com/raylenzed/mihomo-manager-standalone/main/version"
 
@@ -401,6 +401,14 @@ IFACE=$(ip route show default 2>/dev/null | awk '/^default/{print $5}' | head -1
 # 从配置文件读取 fake-ip-range，未配置则使用默认值
 FAKEIP=$(grep 'fake-ip-range' "$CONFIG" 2>/dev/null | awk '{print $2}' | tr -d "'\"" | head -1)
 [ -z "$FAKEIP" ] && FAKEIP="198.18.0.0/16"
+
+# 规则 0: Tailnet IP 优先走 Tailscale 路由表（防止被 Mihomo TUN 劫持绕路）
+if [ "$ACTION" = "add" ]; then
+    ip route show table 52 2>/dev/null | grep -Eq 'tailscale0|100\.64\.0\.0/10' \
+        && ip rule add priority 90 to 100.64.0.0/10 lookup 52 2>/dev/null || true
+else
+    ip rule del priority 90 to 100.64.0.0/10 lookup 52 2>/dev/null || true
+fi
 
 # 规则 1: 公网入站走 main（防止被 TUN 劫持）
 [ -n "$IFACE" ] && ip rule "$ACTION" priority 100 iif "$IFACE" lookup main 2>/dev/null || true
@@ -800,6 +808,14 @@ IFACE=$(ip route show default 2>/dev/null | awk '/^default/{print $5}' | head -1
 FAKEIP=$(grep 'fake-ip-range' "$CONFIG" 2>/dev/null | awk '{print $2}' | tr -d "'\"" | head -1)
 [ -z "$FAKEIP" ] && FAKEIP="198.18.0.0/16"
 
+# 规则 0: Tailnet IP 优先走 Tailscale 路由表（防止被 Mihomo TUN 劫持绕路）
+if [ "$ACTION" = "add" ]; then
+    ip route show table 52 2>/dev/null | grep -Eq 'tailscale0|100\.64\.0\.0/10' \
+        && ip rule add priority 90 to 100.64.0.0/10 lookup 52 2>/dev/null || true
+else
+    ip rule del priority 90 to 100.64.0.0/10 lookup 52 2>/dev/null || true
+fi
+
 # 规则 1: 公网入站走 main（防止被 TUN 劫持）
 [ -n "$IFACE" ] && ip rule "$ACTION" priority 100 iif "$IFACE" lookup main 2>/dev/null || true
 
@@ -818,7 +834,7 @@ RULES
 
     echo ""
     echo -e "  ${BOLD}当前 ip rule:${NC}"
-    ip rule show | grep -E 'priority (100|190|200)' | sed 's/^/    /'
+    ip rule show | grep -E 'priority (90|100|190|200)' | sed 's/^/    /'
     pause
 }
 
@@ -1132,6 +1148,22 @@ _ts_apply_accept_routes() {
     return 1
 }
 
+_tailscale_apply_tailnet_rule() {
+    if ! ip route show table 52 2>/dev/null | grep -Eq 'tailscale0|100\.64\.0\.0/10'; then
+        warn "未检测到 Tailscale 路由表 52，登录成功后再应用 Tailnet 路由规则"
+        return 1
+    fi
+
+    ip rule add priority 90 to 100.64.0.0/10 lookup 52 2>/dev/null || true
+    ip route flush cache 2>/dev/null || true
+    info "已应用 Tailnet 优先路由规则：100.64.0.0/10 → Tailscale table 52"
+}
+
+_tailscale_remove_tailnet_rule() {
+    ip rule del priority 90 to 100.64.0.0/10 lookup 52 2>/dev/null || true
+    ip route flush cache 2>/dev/null || true
+}
+
 _ts_extract_auth_url() {
     local file="$1"
     grep -Eo 'https://login\.tailscale\.com/[A-Za-z0-9_./?=&%:+-]+' "$file" | head -1
@@ -1213,6 +1245,7 @@ _ts_up() {
         if tailscale up --timeout=30s >"$out" 2>&1; then
             info "已连接到 Tailscale 网络"
             _ts_apply_accept_routes "$accept_routes"
+            _tailscale_apply_tailnet_rule
         else
             error "连接失败"
             _ts_show_output "$out"
@@ -1239,6 +1272,7 @@ _ts_login_url() {
     if tailscale up --qr=false --timeout=15s >"$out" 2>&1; then
         info "已连接到 Tailscale 网络"
         _ts_apply_accept_routes "$accept_routes"
+        _tailscale_apply_tailnet_rule
         rm -f "$out"
         return 0
     fi
@@ -1260,6 +1294,7 @@ _ts_login_url() {
         if tailscale up --qr=false --timeout=30s >"$out" 2>&1; then
             info "已连接到 Tailscale 网络"
             _ts_apply_accept_routes "$accept_routes"
+            _tailscale_apply_tailnet_rule
         else
             error "连接失败，请稍后重试"
             _ts_show_output "$out"
@@ -1308,6 +1343,7 @@ _ts_login_key() {
     if tailscale up --auth-key="file:$key_file" --timeout=60s >"$out" 2>&1; then
         info "已连接到 Tailscale 网络"
         _ts_apply_accept_routes "$accept_routes"
+        _tailscale_apply_tailnet_rule
     else
         error "连接失败，请检查 Auth Key 是否有效"
         _ts_show_output "$out"
@@ -1419,6 +1455,7 @@ menu_tailscale_compat() {
     echo "  • tun.exclude-interface: tailscale0"
     echo "  • dns.fake-ip-filter: *.ts.net"
     echo "  • rules: 100.64.0.0/10 → DIRECT"
+    echo "  • ip rule: 100.64.0.0/10 → Tailscale table 52"
     echo "  • 不强制 tailscaled 进程直连，登录控制面可走现有代理"
     echo ""
     divider
@@ -1426,11 +1463,13 @@ menu_tailscale_compat() {
     if _tailscale_compat_enabled; then
         echo ""
         echo "  1. 关闭兼容设置"
+        echo "  2. 修复 Tailnet 路由规则"
         echo "  0. 返回"
         echo ""
         printf "  请输入选项: "
         read -r c
         [ "$c" = "1" ] && _tailscale_compat_disable
+        [ "$c" = "2" ] && { require_root || { pause; return; }; _tailscale_apply_tailnet_rule; pause; }
     else
         echo ""
         echo "  1. 启用兼容设置"
@@ -1483,6 +1522,7 @@ _tailscale_compat_enable() {
 
     echo ""
     _ts_restart_mihomo_if_running
+    _tailscale_apply_tailnet_rule
     pause
 }
 
@@ -1514,6 +1554,7 @@ _tailscale_compat_disable() {
     sed -i '/100\.64\.0\.0\/10/d' "$CONFIG_FILE"
     sed -i '/100\.100\.100\.100/d' "$CONFIG_FILE"
     sed -i '/PROCESS-NAME,[[:space:]]*tailscaled,[[:space:]]*DIRECT/d' "$CONFIG_FILE"
+    _tailscale_remove_tailnet_rule
     info "已移除所有 Tailscale 兼容配置"
 
     echo ""
